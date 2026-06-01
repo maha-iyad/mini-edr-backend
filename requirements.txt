@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+sqlalchemy
+pydantic
+tzdata
+psutil
+requests
+joblib
+scikit-learn
+pandas
+reportlab
+python-multipart
+psycopg2-binary
