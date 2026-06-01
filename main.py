@@ -206,10 +206,19 @@ ensure_telemetry_schema()
 
 app = FastAPI(title="Mini EDR Telemetry API")
 
+
+def get_cors_origins():
+    raw_origins = os.getenv("CORS_ALLOWED_ORIGINS", "*")
+    origins = [origin.strip().rstrip("/") for origin in raw_origins.split(",") if origin.strip()]
+    return origins or ["*"]
+
+
+CORS_ALLOWED_ORIGINS = get_cors_origins()
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Lab mode. Restrict this in production.
-    allow_credentials=True,
+    allow_origins=CORS_ALLOWED_ORIGINS,
+    allow_credentials=CORS_ALLOWED_ORIGINS != ["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
