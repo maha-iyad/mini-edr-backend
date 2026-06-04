@@ -890,6 +890,7 @@ def serialize_telemetry(item: Telemetry, db: Session) -> dict:
         parsed_reasons[0] if parsed_reasons else "No specific reason"
     )
     risk_score = int(item.risk_score or 0)
+    ai_score = int(item.ai_score or 0)
     final_severity = enforce_telemetry_severity(item)
 
     actions_count = (
@@ -941,7 +942,8 @@ def serialize_telemetry(item: Telemetry, db: Session) -> dict:
         "destination_port": item.destination_port,
         "risk_score": risk_score,
         "rule_score": int(item.rule_score or 0),
-        "ai_score": int(item.ai_score or 0),
+        "ai_score": ai_score,
+        "ai_predicted_severity": calculate_severity(ai_score),
         "risk_level": final_severity,
         "risk_reasons": parsed_reasons,
         "top_reason": top_reason,
@@ -1634,6 +1636,7 @@ async def create_telemetry(payload: dict, db: Session = Depends(get_db)):
         "ai_attack_explanation": getattr(telemetry, "ai_attack_explanation", None),
         "ai_attack_category": getattr(telemetry, "ai_attack_category", None),
         "ai_confidence_level": getattr(telemetry, "ai_confidence_level", None),
+        "ai_predicted_severity": calculate_severity(telemetry.ai_score),
         "recommended_action": getattr(telemetry, "recommended_action", None),
         "incident_status": telemetry.incident_status,
         "timestamp": format_local_timestamp(telemetry.timestamp),

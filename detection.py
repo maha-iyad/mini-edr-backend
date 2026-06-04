@@ -2561,6 +2561,30 @@ def calculate_risk_score(telemetry: dict) -> dict:
     else:
         final_score = min(rule_score + ai_score, 100)
 
+    ai_predicted_severity = calculate_severity(ai_score)
+    if ai_model_details:
+        ai_model_details["ai_predicted_severity"] = ai_predicted_severity
+        ai_model_details["ai_severity_basis"] = "ai_score"
+
+    if ai_attack_explanation:
+        ai_attack_explanation = re.sub(
+            r"(AI predicted severity:\s*)(Low|Medium|High|Critical)",
+            rf"\g<1>{ai_predicted_severity}",
+            str(ai_attack_explanation),
+            flags=re.IGNORECASE,
+        )
+        reasons = [
+            re.sub(
+                r"(AI predicted severity:\s*)(Low|Medium|High|Critical)",
+                rf"\g<1>{ai_predicted_severity}",
+                str(reason),
+                flags=re.IGNORECASE,
+            )
+            if str(reason).startswith("AI explanation:")
+            else reason
+            for reason in reasons
+        ]
+
     reasons = dedupe_keep_order(reasons)
     alerts = dedupe_alerts_keep_order(alerts)
 
@@ -2651,6 +2675,7 @@ def calculate_risk_score(telemetry: dict) -> dict:
         "debug_extracted": extracted,
         "ai_attack_category": ai_attack_category,
         "ai_confidence_level": ai_confidence_level,
+        "ai_predicted_severity": ai_predicted_severity,
         "ai_model_details": ai_model_details,
         "recommended_action": recommended_action,
     }
