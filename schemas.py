@@ -117,6 +117,9 @@ class LiveEventCreate(BaseModel):
     event_title: Optional[str] = None
     event_category: Optional[str] = None
     severity: Optional[str] = None
+    cpu_percent: float = 0.0
+    memory_percent: float = 0.0
+    process_count: int = 0
 
     process_name: Optional[str] = None
     pid: Optional[int] = None
@@ -136,6 +139,16 @@ class LiveEventCreate(BaseModel):
     @classmethod
     def validate_required_fields(cls, value):
         return clean_string(value)
+
+    @field_validator("cpu_percent", "memory_percent")
+    @classmethod
+    def validate_live_percentages(cls, value):
+        return max(0.0, min(float(value), 100.0))
+
+    @field_validator("process_count")
+    @classmethod
+    def validate_live_process_count(cls, value):
+        return max(0, int(value))
 
 
 # ============================================================

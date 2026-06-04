@@ -717,12 +717,61 @@ def add_timeline_event(db: Session, telemetry_id: int, event_type: str, message:
 # ============================================================
 
 
+def normalize_endpoint_part(value) -> str:
+    return str(value or "").strip().lower()
+
+
+def get_endpoint_key(value) -> str:
+    hostname = normalize_endpoint_part(getattr(value, "hostname", None))
+    local_ip = normalize_endpoint_part(getattr(value, "ip_address", None))
+    public_ip = normalize_endpoint_part(getattr(value, "public_ip", None))
+    agent_id = normalize_endpoint_part(getattr(value, "agent_id", None))
+
+    if hostname and local_ip:
+        return f"host:{hostname}|local:{local_ip}"
+    if hostname and public_ip:
+        return f"host:{hostname}|public:{public_ip}"
+    if hostname:
+        return f"host:{hostname}"
+    if local_ip:
+        return f"local:{local_ip}"
+    if public_ip:
+        return f"public:{public_ip}"
+    return f"agent:{agent_id}"
+
+
+def get_latest_agents_by_endpoint(db: Session) -> list[Agent]:
+    agents = db.query(Agent).order_by(Agent.last_seen.desc(), Agent.created_at.desc()).all()
+    latest_by_endpoint: dict[str, Agent] = {}
+
+    for agent in agents:
+        key = get_endpoint_key(agent)
+        if key not in latest_by_endpoint:
+            latest_by_endpoint[key] = agent
+
+    return list(latest_by_endpoint.values())
+
+
+def find_existing_agent_for_endpoint(db: Session, payload) -> Agent | None:
+    payload_key = get_endpoint_key(payload)
+    if not payload_key:
+        return None
+
+    for agent in get_latest_agents_by_endpoint(db):
+        if get_endpoint_key(agent) == payload_key:
+            return agent
+
+    return None
+
+
 def upsert_agent_from_registration(
     db: Session,
     payload: AgentRegister | TelemetryCreate | LiveEventCreate,
     last_seen: datetime,
 ):
     existing_agent = db.query(Agent).filter(Agent.agent_id == payload.agent_id).first()
+    if not existing_agent:
+        existing_agent = find_existing_agent_for_endpoint(db, payload)
 
     if existing_agent:
         existing_agent.hostname = payload.hostname
@@ -791,6 +840,45 @@ def calculate_host_risk_summary(events: list[Telemetry]) -> dict:
     }
 
 
+def enforce_telemetry_severity(item: Telemetry) -> str:
+    """Keep stored/displayed incident severity derived only from risk_score."""
+    final_severity = calculate_severity(int(item.risk_score or 0))
+    if item.severity != final_severity:
+        item.severity = final_severity
+    return final_severity
+
+
+def normalize_existing_telemetry_severities():
+    """Repair older rows that may have stored AI/raw severity before this fix."""
+    db = SessionLocal()
+    changed = 0
+
+    try:
+        rows = db.query(Telemetry).all()
+        for item in rows:
+            before = item.severity
+            final_severity = enforce_telemetry_severity(item)
+            if before != final_severity:
+                changed += 1
+
+        if changed:
+            db.commit()
+            backend_logger.info(
+                "Normalized severity for %s telemetry rows using risk_score thresholds.",
+                changed,
+            )
+        else:
+            db.rollback()
+    except Exception as e:
+        db.rollback()
+        backend_logger.warning("Telemetry severity normalization failed: %s", e)
+    finally:
+        db.close()
+
+
+normalize_existing_telemetry_severities()
+
+
 # ============================================================
 # SERIALIZERS
 # ============================================================
@@ -802,7 +890,7 @@ def serialize_telemetry(item: Telemetry, db: Session) -> dict:
         parsed_reasons[0] if parsed_reasons else "No specific reason"
     )
     risk_score = int(item.risk_score or 0)
-    final_severity = calculate_severity(risk_score)
+    final_severity = enforce_telemetry_severity(item)
 
     actions_count = (
         db.query(func.count(ResponseAction.id))
@@ -837,6 +925,7 @@ def serialize_telemetry(item: Telemetry, db: Session) -> dict:
         "attack_intent": safe_json_load(getattr(item, "attack_intent", None)),
         "attack_summary": getattr(item, "attack_summary", None),
         "ai_attack_explanation": getattr(item, "ai_attack_explanation", None),
+        "final_severity": final_severity,
 
         "ai_attack_category": getattr(item, "ai_attack_category", None),
         "ai_confidence_level": getattr(item, "ai_confidence_level", None),
@@ -944,7 +1033,8 @@ def push_live_event(item: dict):
 
 
 def build_stats(db: Session) -> dict:
-    connected_hosts = db.query(func.count(Agent.id)).scalar() or 0
+    unique_agents = get_latest_agents_by_endpoint(db)
+    connected_hosts = len(unique_agents)
     total_events = db.query(func.count(Telemetry.id)).scalar() or 0
 
     avg_cpu = db.query(func.avg(Telemetry.cpu_percent)).scalar()
@@ -1007,8 +1097,7 @@ def build_stats(db: Session) -> dict:
     warning_hosts = 0
     healthy_hosts = 0
 
-    agents = db.query(Agent.id, Agent.hostname).all()
-    for agent in agents:
+    for agent in unique_agents:
         host_events = (
             db.query(Telemetry)
             .filter(Telemetry.hostname == agent.hostname)
@@ -1154,11 +1243,12 @@ async def create_live_event(payload: LiveEventCreate, db: Session = Depends(get_
 
     event_timestamp = parse_client_timestamp(payload.timestamp) or now_local_naive()
 
-    upsert_agent_from_registration(
+    agent, _created = upsert_agent_from_registration(
         db=db,
         payload=payload,
         last_seen=event_timestamp,
     )
+    agent_id = agent.agent_id
 
     live_detection_input = (
         payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
@@ -1192,6 +1282,9 @@ async def create_live_event(payload: LiveEventCreate, db: Session = Depends(get_
         "risk_score": live_risk_score,
         "rule_score": live_rule_score,
         "ai_score": live_ai_score,
+        "cpu_percent": payload.cpu_percent,
+        "memory_percent": payload.memory_percent,
+        "process_count": payload.process_count,
         "process_name": payload.process_name,
         "pid": payload.pid,
         "command_line": payload.command_line,
@@ -1457,11 +1550,12 @@ async def create_telemetry(payload: dict, db: Session = Depends(get_db)):
             isp=raw_payload.get("isp"),
         )
 
-        upsert_agent_from_registration(
+        agent, _created = upsert_agent_from_registration(
             db=db,
             payload=agent_payload,
             last_seen=telemetry_timestamp,
         )
+        telemetry_data["agent_id"] = agent.agent_id
 
         # Always insert a new telemetry row.
         # Do not merge/deduplicate Low events; the Telemetry page should show every payload.
@@ -1469,6 +1563,12 @@ async def create_telemetry(payload: dict, db: Session = Depends(get_db)):
         db.add(telemetry)
         db.commit()
         db.refresh(telemetry)
+
+        previous_severity = telemetry.severity
+        stored_severity = enforce_telemetry_severity(telemetry)
+        if previous_severity != stored_severity:
+            db.commit()
+            db.refresh(telemetry)
 
         telemetry_was_merged = False
 
@@ -1522,6 +1622,7 @@ async def create_telemetry(payload: dict, db: Session = Depends(get_db)):
         "detection_source": telemetry.detection_source,
         "event_category": telemetry.event_category,
         "severity": calculate_severity(telemetry.risk_score),
+        "final_severity": calculate_severity(telemetry.risk_score),
         "decoded_command": getattr(telemetry, "decoded_command", None),
         "decode_method": getattr(telemetry, "decode_method", None),
         "decode_layers": safe_json_load(getattr(telemetry, "decode_layers", None)),
@@ -1841,9 +1942,7 @@ def get_agents(
     db: Session = Depends(get_db),
     _username: str = Depends(require_dashboard_auth),
 ):
-    agents = (
-        db.query(Agent).order_by(Agent.last_seen.desc(), Agent.created_at.desc()).all()
-    )
+    agents = get_latest_agents_by_endpoint(db)
     response = []
 
     for agent in agents:

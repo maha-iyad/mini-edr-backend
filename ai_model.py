@@ -442,8 +442,12 @@ def explain_event(event: Any) -> List[str]:
     return reasons
 
 
-def generate_attack_explanation(event: Any, decoded_command: str | None = None) -> str:
-    prediction = predict_event(event)
+def generate_attack_explanation(
+    event: Any,
+    decoded_command: str | None = None,
+    prediction: Dict[str, Any] | None = None,
+) -> str:
+    prediction = prediction or predict_event(event)
     category = prediction.get("attack_category", "Unknown")
     severity = prediction.get("ai_predicted_severity", "Low")
     confidence = prediction.get("confidence_level", "Informational")

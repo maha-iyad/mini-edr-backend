@@ -277,6 +277,7 @@ SAFE_TEMP_APPDATA_PROCESSES = {
 SYSTEM_ALERT_TYPES = {
     "CPU Spike",
     "High CPU Usage",
+    "Medium CPU Usage",
     "Memory Spike",
     "High Memory Usage",
     "High Process Count",
@@ -360,10 +361,11 @@ def get_alert_priority(alert_type: str) -> int:
         "Script Host Execution Detected": 58,
         "Command Shell Execution": 45,
         "High Process Count": 30,
+        "Medium CPU Usage": 26,
         "High CPU Usage": 24,
         "High Memory Usage": 24,
         "Memory Spike": 20,
-        "CPU Spike": 20,
+        "CPU Spike": 29,
         "General Suspicious Activity": 5,
         "Informational": 0,
     }
@@ -764,7 +766,7 @@ def infer_event_category(
     ):
         return "network_connection"
 
-    if cpu >= 85 or memory >= 85 or process_count >= 300:
+    if cpu >= 60 or memory >= 85 or process_count >= 300:
         return "system_resource"
 
     return "general_detection"
@@ -2044,18 +2046,18 @@ def calculate_risk_score(telemetry: dict) -> dict:
                 + ", ".join(decoded_suspicious_keywords[:8])
             )
 
-    if cpu >= 95:
-        rule_score += 20
+    if cpu > 90:
+        rule_score += 85
         add_alert(
             alerts,
             reasons,
             "CPU Spike",
-            f"Critical CPU usage ({cpu:.1f}%)",
+            f"Critical CPU usage ({cpu:.1f}%) - above 90%",
             "T1499",
             "Impact",
         )
-    elif cpu >= 85:
-        rule_score += 12
+    elif cpu >= 81:
+        rule_score += 70
         add_alert(
             alerts,
             reasons,
@@ -2064,9 +2066,19 @@ def calculate_risk_score(telemetry: dict) -> dict:
             "T1499",
             "Impact",
         )
-    elif cpu >= 75:
-        rule_score += 5
-        reasons.append(f"Elevated CPU usage ({cpu:.1f}%)")
+        high_cpu_reason = f"High CPU usage ({cpu:.1f}%) - 81% to 90%"
+        alerts[-1]["reason"] = high_cpu_reason
+        reasons[-1] = high_cpu_reason
+    elif cpu >= 60:
+        rule_score += 45
+        add_alert(
+            alerts,
+            reasons,
+            "Medium CPU Usage",
+            f"Medium CPU usage ({cpu:.1f}%) - 60% to 80%",
+            "T1499",
+            "Impact",
+        )
 
     if memory >= 95:
         rule_score += 20
@@ -2381,6 +2393,7 @@ def calculate_risk_score(telemetry: dict) -> dict:
         ai_attack_explanation = generate_attack_explanation(
             main_ai_event,
             decoded_command=decoded_command,
+            prediction=main_ai_result,
         )
 
     if main_ai_result.get("available") and main_ai_result.get("prediction") == 1:
