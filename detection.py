@@ -2556,7 +2556,10 @@ def calculate_risk_score(telemetry: dict) -> dict:
 
     rule_score = min(rule_score, 100)
     ai_score = min(ai_score, 100)
-    final_score = min(rule_score + ai_score, 100)
+    if rule_score > 0 and ai_score > 0:
+        final_score = min(int(((rule_score + ai_score) / 2) + 0.5), 100)
+    else:
+        final_score = min(rule_score + ai_score, 100)
 
     reasons = dedupe_keep_order(reasons)
     alerts = dedupe_alerts_keep_order(alerts)
