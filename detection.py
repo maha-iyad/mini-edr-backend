@@ -770,15 +770,19 @@ def infer_event_category(
     return "general_detection"
 
 
+def calculate_severity(risk_score: int) -> str:
+    risk_score = int(risk_score or 0)
+    if risk_score <= 30:
+        return "Low"
+    if risk_score <= 60:
+        return "Medium"
+    if risk_score <= 80:
+        return "High"
+    return "Critical"
+
+
 def infer_severity_from_score(score: int) -> str:
-    score = int(score or 0)
-    if score >= 85:
-        return "critical"
-    if score >= 70:
-        return "high"
-    if score >= 30:
-        return "medium"
-    return "low"
+    return calculate_severity(score)
 
 
 def infer_detection_source(rule_score: int, ai_score: int) -> str:
@@ -2388,7 +2392,8 @@ def calculate_risk_score(telemetry: dict) -> dict:
             "model_probability": main_ai_result.get("model_probability"),
             "severity_model_loaded": main_ai_result.get("severity_model_loaded"),
             "severity_model_prediction": main_ai_result.get("severity_model_prediction"),
-            "ai_severity": main_ai_result.get("severity"),
+            "severity_model_prediction_label": main_ai_result.get("severity_model_prediction_label"),
+            "ai_predicted_severity": main_ai_result.get("ai_predicted_severity"),
         }
         current_ai_score = max(10, int(probability * 25))
         ai_score += current_ai_score
@@ -2551,7 +2556,7 @@ def calculate_risk_score(telemetry: dict) -> dict:
     else:
         primary_alert = {
             "alert_type": (
-                "General Suspicious Activity" if final_score >= 30 else "Informational"
+                "General Suspicious Activity" if final_score > 30 else "Informational"
             ),
             "reason": reasons[0] if reasons else "No specific reason",
             "technique": None,
@@ -2574,7 +2579,7 @@ def calculate_risk_score(telemetry: dict) -> dict:
             process_count=process_count,
         )
 
-    severity = infer_severity_from_score(final_score)
+    severity = calculate_severity(final_score)
 
     attack_confidence = infer_attack_confidence(
         final_score=final_score,

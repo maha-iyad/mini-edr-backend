@@ -225,13 +225,14 @@ def confidence_level(probability: float) -> str:
 
 
 def _severity_from_score(score: int) -> str:
-    if score >= 85:
-        return "Critical"
-    if score >= 70:
-        return "High"
-    if score >= 40:
+    score = int(score or 0)
+    if score <= 30:
+        return "Low"
+    if score <= 60:
         return "Medium"
-    return "Low"
+    if score <= 80:
+        return "High"
+    return "Critical"
 
 
 def infer_attack_category(event: Any) -> str:
@@ -340,7 +341,7 @@ def fallback_predict(features: List[int]) -> Dict[str, Any]:
         "prediction": prediction,
         "probability": probability,
         "confidence": probability,
-        "severity": _severity_from_score(score),
+        "ai_predicted_severity": _severity_from_score(score),
         "risk_score": score,
         "reasons": reasons or ["No strong suspicious AI indicators found"],
         "confidence_level": confidence_level(probability),
@@ -382,14 +383,15 @@ def predict_event(event: Any) -> Dict[str, Any]:
         )
         risk_score = max(0, min(risk_score, 100))
 
-        severity = _severity_from_score(risk_score)
+        ai_predicted_severity = _severity_from_score(risk_score)
         severity_prediction = None
+        severity_prediction_label = None
 
         if severity_model is not None:
             try:
                 severity_input = _build_model_input(features, severity_model)
                 severity_prediction = int(severity_model.predict(severity_input)[0])
-                severity = SEVERITY_NAMES.get(severity_prediction, severity)
+                severity_prediction_label = SEVERITY_NAMES.get(severity_prediction)
             except Exception:
                 pass
 
@@ -399,7 +401,7 @@ def predict_event(event: Any) -> Dict[str, Any]:
             "prediction": hybrid_prediction,
             "probability": round(hybrid_probability, 4),
             "confidence": round(hybrid_probability, 4),
-            "severity": severity,
+            "ai_predicted_severity": ai_predicted_severity,
             "risk_score": risk_score,
             "reasons": heuristic.get("reasons", []),
             "confidence_level": confidence_level(hybrid_probability),
@@ -412,6 +414,7 @@ def predict_event(event: Any) -> Dict[str, Any]:
             "model_probability": round(probability, 4),
             "severity_model_loaded": severity_model is not None,
             "severity_model_prediction": severity_prediction,
+            "severity_model_prediction_label": severity_prediction_label,
         }
 
     except Exception as e:
@@ -442,12 +445,12 @@ def explain_event(event: Any) -> List[str]:
 def generate_attack_explanation(event: Any, decoded_command: str | None = None) -> str:
     prediction = predict_event(event)
     category = prediction.get("attack_category", "Unknown")
-    severity = prediction.get("severity", "Low")
+    severity = prediction.get("ai_predicted_severity", "Low")
     confidence = prediction.get("confidence_level", "Informational")
     reasons = prediction.get("reasons", [])
 
     explanation = (
-        f"The AI classified this event as {severity} severity with {confidence} confidence. "
+        f"AI predicted severity: {severity} with {confidence} confidence. "
         f"Predicted attack category: {category}. "
     )
 

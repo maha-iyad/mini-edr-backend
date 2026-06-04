@@ -23,7 +23,7 @@ from sqlalchemy import func, inspect, text
 from sqlalchemy.orm import Session
 
 from database import SessionLocal, engine, print_db_info
-from detection import calculate_risk_score, decode_base64_command
+from detection import calculate_risk_score, calculate_severity, decode_base64_command
 from models import Agent, Base, ResponseAction, Telemetry, IncidentTimeline
 from schemas import (
     AgentRegister,
@@ -460,12 +460,7 @@ def get_agent_online_status(last_seen: datetime | None) -> str:
 
 
 def risk_level_from_score(score: int) -> str:
-    score = int(score or 0)
-    if score >= 70:
-        return "High"
-    if score >= 30:
-        return "Medium"
-    return "Low"
+    return calculate_severity(score)
 
 
 def infer_detection_source(rule_score: int, ai_score: int) -> str:
@@ -482,14 +477,7 @@ def infer_detection_source(rule_score: int, ai_score: int) -> str:
 
 
 def infer_severity_from_score(score: int) -> str:
-    score = int(score or 0)
-    if score >= 85:
-        return "Critical"
-    if score >= 70:
-        return "High"
-    if score >= 30:
-        return "Medium"
-    return "Low"
+    return calculate_severity(score)
 
 
 def infer_event_category(
@@ -705,9 +693,9 @@ def resolve_ai_confidence_level(
     # Fallback based on final evidence when the AI layer did not return text.
     if int(ai_score or 0) > 0 and int(risk_score or 0) >= 70:
         return "High confidence"
-    if int(ai_score or 0) > 0 and int(risk_score or 0) >= 30:
+    if int(ai_score or 0) > 0 and int(risk_score or 0) > 30:
         return "Medium confidence"
-    if int(risk_score or 0) >= 30:
+    if int(risk_score or 0) > 30:
         return "Low confidence"
 
     return "Informational confidence"
@@ -813,6 +801,8 @@ def serialize_telemetry(item: Telemetry, db: Session) -> dict:
     top_reason = item.top_reason or (
         parsed_reasons[0] if parsed_reasons else "No specific reason"
     )
+    risk_score = int(item.risk_score or 0)
+    final_severity = calculate_severity(risk_score)
 
     actions_count = (
         db.query(func.count(ResponseAction.id))
@@ -860,10 +850,10 @@ def serialize_telemetry(item: Telemetry, db: Session) -> dict:
         "parent_process": item.parent_process,
         "destination_ip": item.destination_ip,
         "destination_port": item.destination_port,
-        "risk_score": int(item.risk_score or 0),
+        "risk_score": risk_score,
         "rule_score": int(item.rule_score or 0),
         "ai_score": int(item.ai_score or 0),
-        "risk_level": risk_level_from_score(int(item.risk_score or 0)),
+        "risk_level": final_severity,
         "risk_reasons": parsed_reasons,
         "top_reason": top_reason,
         "alert_type": item.alert_type,
@@ -872,8 +862,7 @@ def serialize_telemetry(item: Telemetry, db: Session) -> dict:
         "detection_source": item.detection_source
         or infer_detection_source(item.rule_score, item.ai_score),
         "event_category": item.event_category or infer_event_category(item.alert_type),
-        "severity": item.severity
-        or infer_severity_from_score(int(item.risk_score or 0)),
+        "severity": final_severity,
         "incident_status": item.incident_status or "New",
         "response_actions_count": actions_count,
         "timestamp": format_local_timestamp(item.timestamp),
@@ -962,11 +951,11 @@ def build_stats(db: Session) -> dict:
     avg_ram = db.query(func.avg(Telemetry.memory_percent)).scalar()
     max_risk = db.query(func.max(Telemetry.risk_score)).scalar()
     critical_alerts = (
-        db.query(func.count(Telemetry.id)).filter(Telemetry.risk_score >= 70).scalar()
+        db.query(func.count(Telemetry.id)).filter(Telemetry.risk_score > 80).scalar()
         or 0
     )
     low_alerts = (
-        db.query(func.count(Telemetry.id)).filter(Telemetry.risk_score < 30).scalar()
+        db.query(func.count(Telemetry.id)).filter(Telemetry.risk_score <= 30).scalar()
         or 0
     )
 
@@ -1171,6 +1160,22 @@ async def create_live_event(payload: LiveEventCreate, db: Session = Depends(get_
         last_seen=event_timestamp,
     )
 
+    live_detection_input = (
+        payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+    )
+    try:
+        live_detection_result = calculate_risk_score(live_detection_input)
+        if not isinstance(live_detection_result, dict):
+            live_detection_result = {}
+    except Exception as e:
+        backend_logger.warning("live event risk calculation failed: %s", e)
+        live_detection_result = {}
+
+    live_risk_score = clamp_score(live_detection_result.get("risk_score", 0), 0, 100)
+    live_rule_score = clamp_score(live_detection_result.get("rule_score", 0), 0, 100)
+    live_ai_score = clamp_score(live_detection_result.get("ai_score", 0), 0, 100)
+    live_severity = calculate_severity(live_risk_score)
+
     event = {
         "agent_id": agent_id,
         "hostname": hostname,
@@ -1183,7 +1188,10 @@ async def create_live_event(payload: LiveEventCreate, db: Session = Depends(get_
         "event_type": payload.event_type,
         "event_title": payload.event_title or "Live Event",
         "event_category": payload.event_category,
-        "severity": payload.severity or "Medium",
+        "severity": live_severity,
+        "risk_score": live_risk_score,
+        "rule_score": live_rule_score,
+        "ai_score": live_ai_score,
         "process_name": payload.process_name,
         "pid": payload.pid,
         "command_line": payload.command_line,
@@ -1346,19 +1354,7 @@ async def create_telemetry(payload: dict, db: Session = Depends(get_db)):
         or infer_event_category(detection_result.get("alert_type"))
     )
 
-    severity = (
-        detection_result.get("severity")
-        or raw_payload.get("severity")
-        or infer_severity_from_score(risk_score)
-    )
-
-    severity_map = {
-        "critical": "Critical",
-        "high": "High",
-        "medium": "Medium",
-        "low": "Low",
-    }
-    severity = severity_map.get(str(severity).lower(), str(severity))
+    severity = calculate_severity(risk_score)
 
     risk_reasons = detection_result.get("risk_reasons") or []
     if not isinstance(risk_reasons, list):
@@ -1486,7 +1482,7 @@ async def create_telemetry(payload: dict, db: Session = Depends(get_db)):
             ),
         )
 
-        if int(telemetry.risk_score or 0) >= 30:
+        if int(telemetry.risk_score or 0) > 30:
             add_timeline_event(
                 db=db,
                 telemetry_id=telemetry.id,
@@ -1525,7 +1521,7 @@ async def create_telemetry(payload: dict, db: Session = Depends(get_db)):
         "mitre_tactic": telemetry.mitre_tactic,
         "detection_source": telemetry.detection_source,
         "event_category": telemetry.event_category,
-        "severity": telemetry.severity,
+        "severity": calculate_severity(telemetry.risk_score),
         "decoded_command": getattr(telemetry, "decoded_command", None),
         "decode_method": getattr(telemetry, "decode_method", None),
         "decode_layers": safe_json_load(getattr(telemetry, "decode_layers", None)),
@@ -1962,7 +1958,7 @@ def export_telemetry_csv(
                 int(item.rule_score or 0),
                 int(item.ai_score or 0),
                 risk_level_from_score(int(item.risk_score or 0)),
-                item.severity or "",
+                calculate_severity(int(item.risk_score or 0)),
                 item.detection_source or "",
                 item.event_category or "",
                 item.incident_status or "New",
@@ -2024,7 +2020,7 @@ def export_pdf_report(
     )
     high_alerts = (
         db.query(Telemetry)
-        .filter(Telemetry.risk_score >= 70)
+        .filter(Telemetry.risk_score > 60)
         .order_by(Telemetry.risk_score.desc(), Telemetry.timestamp.desc())
         .limit(10)
         .all()
@@ -2142,7 +2138,7 @@ def export_pdf_report(
             high_alerts_data.append(
                 [
                     item.hostname or "-",
-                    item.severity or infer_severity_from_score(item.risk_score or 0),
+                    calculate_severity(item.risk_score or 0),
                     str(item.risk_score or 0),
                     item.detection_source
                     or infer_detection_source(item.rule_score, item.ai_score),
@@ -2189,7 +2185,7 @@ def export_pdf_report(
                 [
                     format_local_timestamp(item.timestamp) or "-",
                     item.hostname or "-",
-                    item.severity or infer_severity_from_score(item.risk_score or 0),
+                    calculate_severity(item.risk_score or 0),
                     item.alert_type or "-",
                     item.top_reason or "-",
                 ]
