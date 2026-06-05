@@ -11,3 +11,4 @@ pandas
 reportlab
 python-multipart
 psycopg2-binary
+websockets
